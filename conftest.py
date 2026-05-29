@@ -1,4 +1,9 @@
-"""Root-level conftest: shared fixtures for the entire test suite."""
+"""Root-level conftest: shared fixtures for the entire test suite.
+
+NOTE: pytest-playwright provides built-in fixtures:
+  playwright, browser, browser_name, context, page, base_url
+We override `context` and `page` to use custom settings from .env.
+"""
 import json
 from pathlib import Path
 from typing import Dict
@@ -6,91 +11,48 @@ from typing import Dict
 import allure
 import pytest
 import yaml
-from playwright.sync_api import Browser, BrowserContext, Page, Playwright, sync_playwright
+from playwright.sync_api import Browser, BrowserContext, Page
 
 from config import settings
 
 
-# ── CLI hooks ────────────────────────────────────────────────────────────────
-
-def pytest_addoption(parser: pytest.Parser) -> None:
-    """Add custom CLI options."""
-    parser.addoption(
-        "--browser",
-        action="store",
-        default=settings.BROWSER,
-        choices=["chromium", "firefox", "webkit"],
-        help="Browser engine to run tests on",
-    )
-    parser.addoption(
-        "--headed",
-        action="store_true",
-        default=False,
-        help="Run tests in headed mode (non-headless)",
-    )
-    parser.addoption(
-        "--base-url",
-        action="store",
-        default=settings.BASE_URL,
-        help="Base URL for the application under test",
-    )
-
+# ── Test collection hooks ────────────────────────────────────────────────────
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     """Deselect slow tests unless --run-slow is given."""
-    if config.getoption("--run-slow"):
-        return  # run everything
+    if config.getoption("--run-slow", default=False):
+        return
     skip_slow = pytest.mark.skip(reason="use --run-slow to include")
     for item in items:
         if "slow" in item.keywords:
             item.add_marker(skip_slow)
 
 
-# ── Playwright fixtures (session scoped)  ────────────────────────────────────
+# ── Override Playwright fixtures with custom settings ────────────────────────
 
 @pytest.fixture(scope="session")
-def playwright_instance() -> Playwright:
-    """Start Playwright once per session."""
-    with sync_playwright() as p:
-        yield p
+def browser(playwright, browser_name) -> Browser:
+    """Launch browser once per session.
 
-
-@pytest.fixture(scope="session")
-def browser_type(request: pytest.FixtureRequest, playwright_instance: Playwright):
-    """Resolve the browser type from CLI option."""
-    browser_name = request.config.getoption("--browser")
-    browsers = {
-        "chromium": playwright_instance.chromium,
-        "firefox": playwright_instance.firefox,
-        "webkit": playwright_instance.webkit,
+    Uses system-installed Chrome when available (channel="chrome"),
+    otherwise falls back to Playwright's bundled browser.
+    """
+    browser_type = getattr(playwright, browser_name)
+    launch_kwargs: dict = {
+        "headless": settings.HEADLESS,
+        "slow_mo": settings.SLOW_MO,
     }
-    return browsers[browser_name]
-
-
-@pytest.fixture(scope="session")
-def browser(browser_type) -> Browser:
-    """Launch a browser once per session."""
-    b = browser_type.launch(
-        headless=settings.HEADLESS,
-        slow_mo=settings.SLOW_MO,
-        args=["--disable-blink-features=AutomationControlled"] if browser_type.name == "chromium" else None,
-    )
+    if browser_name == "chromium":
+        launch_kwargs["channel"] = "chrome"  # use system Chrome
+        launch_kwargs["args"] = ["--disable-blink-features=AutomationControlled"]
+    b = browser_type.launch(**launch_kwargs)
     yield b
     b.close()
 
 
-# ── Test-level fixtures ──────────────────────────────────────────────────────
-
-@pytest.fixture(autouse=True)
-def allure_environment(request: pytest.FixtureRequest) -> None:
-    """Attach environment info to Allure report."""
-    allure.dynamic.feature(request.node.parent.name if hasattr(request.node, "parent") else "Unknown")
-    allure.dynamic.story(request.node.name)
-
-
 @pytest.fixture()
 def context(browser: Browser) -> BrowserContext:
-    """Create a new browser context for each test (isolated storage/cookies)."""
+    """Create an isolated browser context per test."""
     ctx = browser.new_context(
         viewport={"width": settings.VIEWPORT_WIDTH, "height": settings.VIEWPORT_HEIGHT},
         locale=settings.LOCALE,
@@ -111,10 +73,14 @@ def page(context: BrowserContext) -> Page:
     p.close()
 
 
-@pytest.fixture()
-def base_url(request: pytest.FixtureRequest) -> str:
-    """Get base URL from CLI option."""
-    return request.config.getoption("--base-url")
+# ── Allure integration ───────────────────────────────────────────────────────
+
+@pytest.fixture(autouse=True)
+def allure_environment(request: pytest.FixtureRequest) -> None:
+    """Attach dynamic feature/story tags to Allure report."""
+    parent = request.node.parent
+    allure.dynamic.feature(getattr(parent, "name", "Unknown"))
+    allure.dynamic.story(request.node.name)
 
 
 # ── Test data helpers ────────────────────────────────────────────────────────

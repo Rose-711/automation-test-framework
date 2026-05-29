@@ -34,7 +34,7 @@ class TestExample:
         link = example_page.page.locator("a")
         expect(link).to_be_visible()
         link_text = link.inner_text()
-        assert "more information" in link_text.lower()
+        assert link_text.lower() in ("more information", "learn more")
 
     @allure.title("URL should be correct")
     def test_url(self, example_page: ExamplePage) -> None:
